@@ -83,50 +83,62 @@ import isaaclab_tasks.manager_based.locomanipulation.pick_place  # noqa: F401
 import isaaclab_tasks.manager_based.manipulation.pick_place  # noqa: F401
 
 
-def normalize_hdf5_actions(config: Config, log_dir: str) -> str:
+def _set_dataset_path(config: Config, new_path: str) -> None:
+    """Set the HDF5 dataset path on a v0.5-form robomimic config.
+
+    Args:
+        config: Robomimic ``Config``.
+        new_path: New filesystem path to assign.
+    """
+    config.train.data[0]["path"] = new_path
+
+
+def normalize_hdf5_actions(config: Config, log_dir: str) -> None:
     """Normalizes actions in hdf5 dataset to [-1, 1] range.
+
+    Each entry in ``config.train.data`` gets its own ``_normalized`` copy on disk,
+    with a per-dataset min/max scaling. Each entry's ``path`` field is updated
+    in-place to point at the normalized copy. Per-dataset min/max values are
+    written to ``<log_dir>/normalization_params.txt``.
 
     Args:
         config: The configuration object containing dataset path.
         log_dir: Directory to save normalization parameters.
-
-    Returns:
-        Path to the normalized dataset.
     """
-    base, ext = os.path.splitext(config.train.data)
-    normalized_path = base + "_normalized" + ext
+    params_lines = []
+    for ds_idx, dataset_cfg in enumerate(config.train.data):
+        original_path = dataset_cfg["path"]
+        base, ext = os.path.splitext(original_path)
+        normalized_path = base + "_normalized" + ext
 
-    # Copy the original dataset
-    print(f"Creating normalized dataset at {normalized_path}")
-    shutil.copyfile(config.train.data, normalized_path)
+        print(f"Creating normalized dataset at {normalized_path}")
+        shutil.copyfile(original_path, normalized_path)
 
-    # Open the new dataset and normalize the actions
-    with h5py.File(normalized_path, "r+") as f:
-        dataset_paths = [f"/data/demo_{str(i)}/actions" for i in range(len(f["data"].keys()))]
+        with h5py.File(normalized_path, "r+") as hf:
+            n_demos = len(hf["data"].keys())
+            dataset_paths = [f"/data/demo_{i}/actions" for i in range(n_demos)]
 
-        # Compute the min and max of the dataset
-        dataset = np.array(f[dataset_paths[0]]).flatten()
-        for i, path in enumerate(dataset_paths):
-            if i != 0:
-                data = np.array(f[path]).flatten()
-                dataset = np.append(dataset, data)
+            # Streaming min/max — avoids materialising all actions at once.
+            ds_min = float("inf")
+            ds_max = float("-inf")
+            for path in dataset_paths:
+                arr = hf[path][...]
+                ds_min = min(ds_min, float(arr.min()))
+                ds_max = max(ds_max, float(arr.max()))
 
-        max = np.max(dataset)
-        min = np.min(dataset)
+            # In-place rescale — preserves the existing chunking/compression and
+            # avoids the h5py del+reassign pattern, which accumulates internal
+            # dataset metadata and grows the file on disk.
+            scale = ds_max - ds_min
+            for path in dataset_paths:
+                ds = hf[path]
+                ds[...] = 2.0 * ((ds[...] - ds_min) / scale) - 1.0
 
-        # Normalize the actions
-        for i, path in enumerate(dataset_paths):
-            data = np.array(f[path])
-            normalized_data = 2 * ((data - min) / (max - min)) - 1  # Scale to [-1, 1] range
-            del f[path]
-            f[path] = normalized_data
+        dataset_cfg["path"] = normalized_path
+        params_lines.append(f"dataset {ds_idx}: {original_path}\n  min: {ds_min}\n  max: {ds_max}\n")
 
-        # Save the min and max values to log directory
-        with open(os.path.join(log_dir, "normalization_params.txt"), "w") as f:
-            f.write(f"min: {min}\n")
-            f.write(f"max: {max}\n")
-
-    return normalized_path
+    with open(os.path.join(log_dir, "normalization_params.txt"), "w") as f:
+        f.writelines(params_lines)
 
 
 def train(config: Config, device: str, log_dir: str, ckpt_dir: str, video_dir: str):
@@ -160,52 +172,97 @@ def train(config: Config, device: str, log_dir: str, ckpt_dir: str, video_dir: s
     # read config to set up metadata for observation modalities (e.g. detecting rgb observations)
     ObsUtils.initialize_obs_utils_with_config(config)
 
-    # make sure the dataset exists
-    dataset_path = os.path.expanduser(config.train.data)
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError(f"Dataset at provided path {dataset_path} not found!")
+    # action_keys is shared across all datasets — v0.5's get_shape_metadata_from_dataset
+    # requires it explicitly. Default to ["actions"] for v0.4-style configs.
+    action_keys = list(config.train.get("action_keys") or ["actions"])
 
-    # load basic metadata from training file
+    # extract metadata (env + shape) for every configured dataset
     print("\n============= Loaded Environment Metadata =============")
-    env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path=config.train.data)
-    shape_meta = FileUtils.get_shape_metadata_from_dataset(
-        dataset_path=config.train.data, all_obs_keys=config.all_obs_keys, verbose=True
-    )
+    env_meta_list = []
+    shape_meta_list = []
+    for dataset_cfg in config.train.data:
+        dataset_path = os.path.expanduser(dataset_cfg["path"])
+        if not os.path.exists(dataset_path):
+            raise FileNotFoundError(f"Dataset at provided path {dataset_path} not found!")
+
+        # v0.5 FileUtils.get_env_metadata_from_dataset dereferences env_meta["env_kwargs"] before
+        # returning; IsaacLab Mimic datasets omit that key. Inline the helper so the default
+        # can be injected before the lookup.
+        with h5py.File(dataset_path, "r") as _f:
+            env_meta = json.loads(_f["data"].attrs["env_args"])
+        env_meta.setdefault("env_kwargs", {})
+        env_meta["env_kwargs"].pop("env_lang", None)
+        EnvUtils.set_env_specific_obs_processing(env_meta=env_meta)
+        env_meta_list.append(env_meta)
+
+        shape_meta = FileUtils.get_shape_metadata_from_dataset(
+            dataset_config=dataset_cfg,
+            action_keys=action_keys,
+            all_obs_keys=config.all_obs_keys,
+            verbose=True,
+        )
+        shape_meta_list.append(shape_meta)
 
     if config.experiment.env is not None:
+        # mirror upstream: apply the override only to the first dataset's env_meta
+        env_meta = env_meta_list[0].copy()
         env_meta["env_name"] = config.experiment.env
+        env_meta_list = [env_meta]
         print("=" * 30 + "\n" + "Replacing Env to {}\n".format(env_meta["env_name"]) + "=" * 30)
 
-    # create environment
+    # create environments (kept structurally aligned with upstream v0.5; unused at train time
+    # since the IsaacLab fork strips in-loop rollouts)
     envs = OrderedDict()
     if config.experiment.rollout.enabled:
-        # create environments for validation runs
-        env_names = [env_meta["env_name"]]
+        for env_i in range(len(env_meta_list)):
+            dataset_cfg = config.train.data[env_i]
+            if not dataset_cfg.get("eval", True):
+                continue
+            env_meta = env_meta_list[env_i]
+            shape_meta = shape_meta_list[env_i]
 
-        if config.experiment.additional_envs is not None:
-            for name in config.experiment.additional_envs:
-                env_names.append(name)
+            env_names = [env_meta["env_name"]]
+            if (env_i == 0) and (config.experiment.additional_envs is not None):
+                for name in config.experiment.additional_envs:
+                    env_names.append(name)
 
-        for env_name in env_names:
-            env = EnvUtils.create_env_from_metadata(
-                env_meta=env_meta,
-                env_name=env_name,
-                render=False,
-                render_offscreen=config.experiment.render_video,
-                use_image_obs=shape_meta["use_images"],
-            )
-            envs[env.name] = env
-            print(envs[env.name])
+            for env_name in env_names:
+                env = EnvUtils.create_env_from_metadata(
+                    env_meta=env_meta,
+                    env_name=env_name,
+                    render=False,
+                    render_offscreen=config.experiment.render_video,
+                    use_image_obs=shape_meta["use_images"],
+                )
+                envs[env.name] = env
+                print(envs[env.name])
 
     print("")
 
     # setup for a new training run
     data_logger = DataLogger(log_dir, config=config, log_tb=config.experiment.logging.log_tb)
+
+    # v0.5 LR schedulers (e.g. cosine for diffusion_policy) read num_train_batches and
+    # num_epochs from optim_params before training starts. Upstream sources num_train_batches
+    # from len(trainset); this fork constructs trainset after algo_factory, so we use
+    # config.experiment.epoch_every_n_steps directly — which is what the train loop will
+    # actually pass to TrainUtils.run_epoch anyway.
+    train_num_steps = config.experiment.epoch_every_n_steps
+    assert train_num_steps is not None, (
+        "config.experiment.epoch_every_n_steps must be set; this fork builds the dataset"
+        " after algo_factory, so len(trainset) is not available for the LR scheduler."
+    )
+    with config.values_unlocked():
+        if "optim_params" in config.algo:
+            for k in config.algo.optim_params:
+                config.algo.optim_params[k]["num_train_batches"] = train_num_steps
+                config.algo.optim_params[k]["num_epochs"] = config.train.num_epochs
+
     model = algo_factory(
         algo_name=config.algo_name,
         config=config,
-        obs_key_shapes=shape_meta["all_shapes"],
-        ac_dim=shape_meta["ac_dim"],
+        obs_key_shapes=shape_meta_list[0]["all_shapes"],
+        ac_dim=shape_meta_list[0]["ac_dim"],
         device=device,
     )
 
@@ -218,7 +275,7 @@ def train(config: Config, device: str, log_dir: str, ckpt_dir: str, video_dir: s
     print("")
 
     # load training data
-    trainset, validset = TrainUtils.load_data_for_training(config, obs_keys=shape_meta["all_obs_keys"])
+    trainset, validset = TrainUtils.load_data_for_training(config, obs_keys=shape_meta_list[0]["all_obs_keys"])
     train_sampler = trainset.get_dataset_sampler()
     print("\n============= Training Dataset =============")
     print(trainset)
@@ -325,8 +382,8 @@ def train(config: Config, device: str, log_dir: str, ckpt_dir: str, video_dir: s
             TrainUtils.save_model(
                 model=model,
                 config=config,
-                env_meta=env_meta,
-                shape_meta=shape_meta,
+                env_meta=env_meta_list[0] if len(env_meta_list) == 1 else env_meta_list,
+                shape_meta=shape_meta_list[0] if len(shape_meta_list) == 1 else shape_meta_list,
                 ckpt_path=os.path.join(ckpt_dir, epoch_ckpt_name + ".pth"),
                 obs_normalization_stats=obs_normalization_stats,
             )
@@ -347,24 +404,25 @@ def main(args: argparse.Namespace):
     Args:
         args: Command line arguments.
     """
-    # load config
-    if args.task is not None:
-        # obtain the configuration entry point
+    # Determine the JSON config file: --config takes precedence over the gym-registry
+    # entry-point lookup keyed by --task / --algo.
+    if args.config is not None:
+        if not os.path.exists(args.config):
+            raise FileNotFoundError(f"Config file not found at: {args.config}")
+        config_file = args.config
+        print(f"Loading configuration from --config: {config_file}")
+    elif args.task is not None:
         cfg_entry_point_key = f"robomimic_{args.algo}_cfg_entry_point"
         task_name = args.task.split(":")[-1]
 
         print(f"Loading configuration for task: {task_name}")
-        print(gym.envs.registry.keys())
-        print(" ")
         cfg_entry_point_file = gym.spec(task_name).kwargs.pop(cfg_entry_point_key)
-        # check if entry point exists
         if cfg_entry_point_file is None:
             raise ValueError(
                 f"Could not find configuration for the environment: '{task_name}'."
                 f" Please check that the gym registry has the entry point: '{cfg_entry_point_key}'."
             )
 
-        # resolve module path if needed
         if ":" in cfg_entry_point_file:
             mod_name, file_name = cfg_entry_point_file.split(":")
             mod = importlib.import_module(mod_name)
@@ -374,19 +432,26 @@ def main(args: argparse.Namespace):
             config_file = os.path.join(mod_path, file_name)
         else:
             config_file = cfg_entry_point_file
-
-        with open(config_file) as f:
-            ext_cfg = json.load(f)
-            config = config_factory(ext_cfg["algo_name"])
-        # update config with external json - this will throw errors if
-        # the external config has keys not present in the base algo config
-        with config.values_unlocked():
-            config.update(ext_cfg)
     else:
-        raise ValueError("Please provide a task name through CLI arguments.")
+        raise ValueError("Please provide either --config or --task on the CLI.")
+
+    with open(config_file) as f:
+        ext_cfg = json.load(f)
+        config = config_factory(ext_cfg["algo_name"])
+    # update config with external json - this will throw errors if
+    # the external config has keys not present in the base algo config
+    with config.values_unlocked():
+        config.update(ext_cfg)
+        # v0.5 dataset_factory iterates config.train.data as a list of {"path": ...} dicts.
+        # IsaacLab task configs ship `data` as a string (or omit it, leaving v0.5's None
+        # default in place). Coerce once so the rest of this script and robomimic internals
+        # can assume the v0.5 form.
+        if not isinstance(config.train.data, list):
+            default_path = config.train.data if isinstance(config.train.data, str) else ""
+            config.train.data = [{"path": default_path}]
 
     if args.dataset is not None:
-        config.train.data = args.dataset
+        _set_dataset_path(config, args.dataset)
 
     if args.name is not None:
         config.experiment.name = args.name
@@ -397,10 +462,11 @@ def main(args: argparse.Namespace):
     # change location of experiment directory
     config.train.output_dir = os.path.abspath(os.path.join("./logs", args.log_dir, args.task))
 
-    log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config)
+    # v0.5 get_exp_dir returns a 4th value (time_dir) used for resume; not needed here.
+    log_dir, ckpt_dir, video_dir, _ = TrainUtils.get_exp_dir(config)
 
     if args.normalize_training_actions:
-        config.train.data = normalize_hdf5_actions(config, log_dir)
+        normalize_hdf5_actions(config, log_dir)
 
     # get torch device
     device = TorchUtils.get_torch_device(try_to_use_cuda=config.train.cuda)
@@ -435,6 +501,16 @@ if __name__ == "__main__":
         help="(optional) if provided, override the dataset path defined in the config",
     )
 
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=(
+            "(optional) path to a JSON config file. If provided, bypasses the"
+            " gym-registry entry-point lookup and loads the algo config from this"
+            " file directly."
+        ),
+    )
     parser.add_argument("--task", type=str, default=None, help="Name of the task.")
     parser.add_argument("--algo", type=str, default=None, help="Name of the algorithm.")
     parser.add_argument("--log_dir", type=str, default="robomimic", help="Path to log directory")
