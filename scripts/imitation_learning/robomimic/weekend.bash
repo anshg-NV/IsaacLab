@@ -15,7 +15,7 @@ conda activate isaaclab_robomimic
 cd ~/Documents/Isaac-AutoData/submodules/IsaacLab-Arena/submodules/IsaacLab
 shopt -s globstar
 
-for i in {4..10}; do
+for i in {0..10}; do
     if (( i <= 8 )); then
         epochs=600
     elif (( i == 9 )); then
@@ -28,4 +28,7 @@ for i in {4..10}; do
         --task Isaac-Stack-Cube-Franka-IK-Rel-Visuomotor-v0 \
         --checkpoint logs/weekend/robomimic_${i}/**/models/model_epoch_${epochs}.pth \
         --enable_cameras --viz kit
+    echo "--------------------------------"
+    echo "Completed training for dp_${i}"
+    echo "--------------------------------"
 done
