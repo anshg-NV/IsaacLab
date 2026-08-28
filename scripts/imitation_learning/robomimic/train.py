@@ -40,10 +40,45 @@ import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.torch_utils as TorchUtils
 import robomimic.utils.train_utils as TrainUtils
 import torch
+from isaaclab_arena.utils.experiment_paths import ExperimentPaths
 from robomimic.algo import algo_factory
 from robomimic.config import Config, config_factory
 from robomimic.utils.log_utils import DataLogger, PrintLogger, flush_warnings
 from torch.utils.data import DataLoader
+
+
+def make_run_dirs(run_dir: str, save_enabled: bool, resume: bool, overwrite: bool) -> tuple[str, str | None, str]:
+    """Create the flat output tree for a single run and return its (logs, models, run) dirs.
+
+    Replaces robomimic's ``TrainUtils.get_exp_dir``, which nests outputs under an extra
+    ``<experiment name>/<timestamp>`` pair. Here everything for one run lives directly in
+    ``run_dir``: ``logs/``, ``models/``, ``config.json`` and ``last.pth``.
+
+    Args:
+        run_dir: Directory holding every output of this run.
+        save_enabled: Whether model checkpointing is enabled; the ``models`` dir is only created if so.
+        resume: Whether training resumes in an existing run directory.
+        overwrite: Whether to delete an existing run directory instead of refusing to write into it.
+    """
+    if resume:
+        assert os.path.isdir(run_dir), f"Resuming training run, but run directory {run_dir} does not exist"
+    elif os.path.isdir(run_dir) and os.listdir(run_dir):
+        assert overwrite, (
+            f"Run directory {run_dir} already exists and is not empty. Pass --overwrite to replace it, --resume to"
+            " continue training in it, or pick a different --run."
+        )
+        print(f"Removing existing run directory {run_dir}")
+        shutil.rmtree(run_dir)
+
+    log_dir = os.path.join(run_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    ckpt_dir = None
+    if save_enabled:
+        ckpt_dir = os.path.join(run_dir, "models")
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+    return log_dir, ckpt_dir, run_dir
 
 
 def normalize_hdf5_actions(config: Config, log_dir: str) -> None:
@@ -94,7 +129,7 @@ def normalize_hdf5_actions(config: Config, log_dir: str) -> None:
         f.writelines(params_lines)
 
 
-def train(config, device, resume=False, normalize_training_actions=False):  # noqa: C901
+def train(config, device, run_dir, resume=False, overwrite=False, normalize_training_actions=False):  # noqa: C901
     """
     Train a model using the algorithm.
     """
@@ -106,11 +141,12 @@ def train(config, device, resume=False, normalize_training_actions=False):  # no
     print("\n============= New Training Run with Config =============")
     print(config)
     print("")
-    log_dir, ckpt_dir, video_dir, time_dir = TrainUtils.get_exp_dir(config, resume=resume)
+    log_dir, ckpt_dir, time_dir = make_run_dirs(
+        run_dir, save_enabled=config.experiment.save.enabled, resume=resume, overwrite=overwrite
+    )
 
     print(f">>> Saving logs into directory: {log_dir}")
     print(f">>> Saving checkpoints into directory: {ckpt_dir}")
-    print(f">>> Saving videos into directory: {video_dir}")
 
     # path for latest model and backup (to support @resume functionality)
     latest_model_path = os.path.join(time_dir, "last.pth")
@@ -493,7 +529,13 @@ def main(args):
         else:
             config_file = cfg_entry_point_file
     else:
-        raise ValueError("Please provide either --config or --task on the CLI.")
+        # default: the run's config inside the experiment, experiments/<experiment>/train/configs/dp_<run>.json
+        config_file = str(ExperimentPaths(args.experiment).configs_dir / f"dp_{args.run}.json")
+        assert os.path.exists(config_file), (
+            f"No config for run {args.run} of experiment {args.experiment} at {config_file}. Add it there, or pass"
+            " --config explicitly."
+        )
+        print(f"Loading configuration for run {args.run}: {config_file}")
 
     with open(config_file) as f:
         ext_cfg = json.load(f)
@@ -515,8 +557,9 @@ def main(args):
     if args.epochs is not None:
         config.train.num_epochs = args.epochs
 
-    # change location of experiment directory
-    config.train.output_dir = os.path.abspath(os.path.join("./logs", args.log_dir, args.task))
+    # every output of this run lands in experiments/<experiment>/eval/<run>
+    run_dir = str(ExperimentPaths(args.experiment).run_dir(args.run))
+    config.train.output_dir = run_dir
 
     # get torch device
     device = TorchUtils.get_torch_device(try_to_use_cuda=config.train.cuda)
@@ -538,7 +581,8 @@ def main(args):
         config.experiment.rollout.horizon = 10
 
         # send output to a temporary directory
-        config.train.output_dir = "/tmp/tmp_trained_models"
+        run_dir = os.path.join("/tmp/tmp_trained_models", args.run)
+        config.train.output_dir = run_dir
 
     # lock config to prevent further modifications and ensure missing keys raise errors
     config.lock()
@@ -546,7 +590,14 @@ def main(args):
     # catch error during training and print it
     res_str = "finished run successfully!"
     try:
-        train(config, device, resume=args.resume, normalize_training_actions=args.normalize_training_actions)
+        train(
+            config,
+            device,
+            run_dir,
+            resume=args.resume,
+            overwrite=args.overwrite,
+            normalize_training_actions=args.normalize_training_actions,
+        )
     except Exception as e:
         res_str = f"run failed with error:\n{e}\n\n{traceback.format_exc()}"
     print(res_str)
@@ -561,14 +612,15 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="(optional) path to a config json that will be used to override the default settings. \
-            If omitted, default settings are used. This is the preferred way to run experiments.",
+            Defaults to the run's config in the experiment, experiments/<experiment>/train/configs/dp_<run>.json.",
     )
 
     # Algorithm Name
     parser.add_argument(
         "--algo",
         type=str,
-        help="(optional) name of algorithm to run. Only needs to be provided if --config is not provided",
+        default="diffusion_policy",
+        help="name of algorithm to run. Only used when the config is resolved from --task",
     )
 
     # Experiment Name (for tensorboard, saving models, etc.)
@@ -600,7 +652,26 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--task", type=str, default=None, help="Name of the task.")
-    parser.add_argument("--log_dir", type=str, default="robomimic", help="Path to log directory")
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        required=True,
+        help="Experiment name; outputs go to experiments/<experiment>/eval/<run>.",
+    )
+    parser.add_argument(
+        "--run",
+        type=str,
+        required=True,
+        help=(
+            "Run index within the experiment, e.g. '0'. Names the checkpoint directory and selects the training"
+            " config dp_<run>.json."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="set this flag to delete an existing run directory instead of erroring out",
+    )
     parser.add_argument("--normalize_training_actions", action="store_true", default=False, help="Normalize actions")
     parser.add_argument(
         "--epochs",

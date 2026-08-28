@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 conda activate isaaclab_robomimic
 cd ~/Documents/Isaac-AutoData/submodules/IsaacLab-Arena/submodules/IsaacLab
 mkdir -p logs/hubble

@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 conda activate isaac_auto_data
 cd ~/Documents/Isaac-AutoData/submodules/IsaacLab-Arena/submodules/IsaacLab
 mkdir -p logs/long_weekend

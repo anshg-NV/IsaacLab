@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 conda activate isaaclab_robomimic_3_0
 cd ~/Documents/Isaac-AutoData/submodules/IsaacLab-Arena
 shopt -s globstar
