@@ -98,17 +98,24 @@ def env_loop(
     with contextlib.suppress(KeyboardInterrupt) and torch.inference_mode():
         while True:
             # check if any environment needs to be reset while waiting for actions
-            while env_action_queue.qsize() != env.num_envs:
+            while True:
                 asyncio_event_loop.run_until_complete(asyncio.sleep(0))
                 if data_gen_tasks is not None and data_gen_tasks.done():
                     exc = data_gen_tasks.exception()
                     if exc is not None:
                         raise exc
                     return
+                datagen_cfg = env.cfg.datagen_config
+                check_val = num_success if datagen_cfg.generation_guarantee else num_attempts
+                if check_val >= datagen_cfg.generation_num_trials:
+                    print(f"Reached {datagen_cfg.generation_num_trials} successes/attempts. Exiting.")
+                    return
                 while not env_reset_queue.empty():
                     env_id_tensor[0] = env_reset_queue.get_nowait()
                     env.reset(env_ids=env_id_tensor)
                     env_reset_queue.task_done()
+                if env_action_queue.qsize() == env.num_envs:
+                    break
 
             actions = torch.zeros(env.action_space.shape)
             get_tasks = [env_action_queue.get() for _ in range(env.num_envs)]

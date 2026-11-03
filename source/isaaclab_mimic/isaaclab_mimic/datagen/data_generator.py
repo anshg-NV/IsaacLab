@@ -119,7 +119,7 @@ def get_delta_pose_with_scheme(
     coord_transform_scheme = task_constraint["coordination_scheme"]
     device = src_obj_pose.device
     if coord_transform_scheme == SubTaskConstraintCoordinationScheme.TRANSFORM:
-        delta_pose = PoseUtils.get_delta_object_pose(cur_obj_pose, src_obj_pose)
+        delta_pose = cur_obj_pose @ PoseUtils.pose_inv(src_obj_pose)
         # add noise to delta pose position
     elif coord_transform_scheme == SubTaskConstraintCoordinationScheme.TRANSLATE:
         delta_pose = torch.eye(4, device=device)
@@ -667,6 +667,9 @@ class DataGenerator:
         self.env.recorder_manager.reset(env_ids=env_id_tensor)
         await env_reset_queue.put(env_id)
         await env_reset_queue.join()
+        settle = getattr(self.env, "settle_before_datagen", None)
+        if settle is not None:
+            await settle(env_id, env_action_queue)
         new_initial_state = self.env.scene.get_state(is_relative=True)
 
         # create runtime subtask constraint rules from subtask constraint configs
@@ -900,7 +903,9 @@ class DataGenerator:
                 is_navigating = navigation_state["is_navigating"]
                 navigation_goal_reached = navigation_state["navigation_goal_reached"]
 
+            advanced_eefs = set()
             for eef_name in self.env_cfg.subtask_configs.keys():
+                advanced_eefs.add(eef_name)
                 current_eef_subtask_step_indices[eef_name] += 1
 
                 # Execute locomanip navigation controller if it is enabled via the use_navigation_controller flag
@@ -963,6 +968,8 @@ class DataGenerator:
                                     "finished"
                                 ]
                                 or current_eef_subtask_step_indices[concurrent_task_spec_key]
+                                # Compare both arms after this executed step, regardless of iteration order.
+                                + int(concurrent_task_spec_key not in advanced_eefs)
                                 >= len(current_eef_subtask_trajectories[concurrent_task_spec_key]) - 1
                             )
 
