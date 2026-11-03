@@ -150,6 +150,7 @@ class RecorderManager(ManagerBase):
         """
         self._term_names: list[str] = []
         self._terms: dict[str, RecorderTerm] = {}
+        self._recording_paused: set[int] = set()
         self._dataset_file_handler = None
         self._failed_episode_dataset_file_handler = None
 
@@ -290,6 +291,26 @@ class RecorderManager(ManagerBase):
         episode.success = None if success < 0 else bool(success)
         return episode
 
+    def set_recording_enabled(self, enabled: bool, env_ids: Sequence[int] | slice | None = None) -> None:
+        """Enable or pause appending data for selected environments, preserving their buffers.
+
+        Args:
+            enabled: Whether new recorder samples should be retained.
+            env_ids: Environment indices; None selects all environments.
+        """
+        if not self.active_terms:
+            return
+        if env_ids is None:
+            env_ids = range(self._env.num_envs)
+        elif isinstance(env_ids, slice):
+            env_ids = range(self._env.num_envs)[env_ids]
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids = env_ids.tolist()
+        if enabled:
+            self._recording_paused.difference_update(env_ids)
+        else:
+            self._recording_paused.update(env_ids)
+
     def add_to_episodes(
         self, key: str, value: torch.Tensor | dict, env_ids: Sequence[int] | slice | None = None
     ) -> None:
@@ -319,6 +340,18 @@ class RecorderManager(ManagerBase):
             raise ValueError(f"Field '{key}' requires {num_selected} rows, got {tuple(value.shape)}.")
         if not num_selected:
             return
+        if self._recording_paused:
+            if env_ids is None:
+                env_ids = range(self._env.num_envs)
+            elif isinstance(env_ids, slice):
+                env_ids = range(self._env.num_envs)[env_ids]
+            elif isinstance(env_ids, torch.Tensor):
+                env_ids = env_ids.tolist()
+            indices = [i for i, env_id in enumerate(env_ids) if env_id not in self._recording_paused]
+            if not indices:
+                return
+            value = value[indices]
+            env_ids = [env_ids[i] for i in indices]
         field = next((field for field in self._fields if field.name == key), None)
         if field is None:
             # Reject ambiguous leaf/subtree paths before allocating any storage.

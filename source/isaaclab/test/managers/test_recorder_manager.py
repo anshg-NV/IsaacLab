@@ -254,3 +254,36 @@ def test_recorder_storage_boundary():
     field = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == "_RecorderField")
     append = next(node for node in field.body if isinstance(node, ast.FunctionDef) and node.name == "append")
     assert not any(isinstance(node, (ast.For, ast.While, ast.comprehension)) for node in ast.walk(append))
+
+
+def test_pause_recording_per_environment():
+    """Pausing one episode must preserve other rows and nested camera/state indexing."""
+    env = create_dummy_env(num_envs=5)
+    cfg = DummyRecorderManagerCfg()
+    cfg.dataset_export_mode = DatasetExportMode.EXPORT_NONE
+    manager = RecorderManager(cfg, env)
+    manager.set_recording_enabled(False, env_ids=torch.tensor([1, 3]))
+    values = torch.arange(env.num_envs).reshape(-1, 1)
+    manager.add_to_episodes("obs", {"value": values})
+    assert manager.get_episode(1).is_empty() and manager.get_episode(3).is_empty()
+    assert manager.get_episode(2).data["obs"]["value"][0].item() == 2
+    # Subset rows refer to env_ids order, not absolute environment indices.
+    manager.add_to_episodes("subset", torch.tensor([[33], [44], [11]]), env_ids=[3, 4, 1])
+    assert manager.get_episode(4).data["subset"][0].item() == 44
+    manager.add_to_episodes("slice", torch.tensor([[11], [22], [33]]), env_ids=slice(1, 4))
+    assert manager.get_episode(2).data["slice"][0].item() == 22
+    manager.reset(env_ids=[1])
+    manager.record_pre_step()
+    assert manager.get_episode(1).is_empty()
+    manager.set_recording_enabled(True, env_ids=[1])
+    manager.record_pre_step()
+    assert len(manager.get_episode(1).data["record_pre_step"]) == 1
+    assert len(manager.get_episode(0).data["record_pre_step"]) == 2
+    assert manager.get_episode(3).is_empty()
+    manager.set_recording_enabled(False)
+    manager.record_post_step()
+    assert "record_post_step" not in manager.get_episode(0).data
+    manager.set_recording_enabled(True)
+    manager.record_post_step()
+    assert len(manager.get_episode(3).data["record_post_step"]) == 1
+    manager.close()
