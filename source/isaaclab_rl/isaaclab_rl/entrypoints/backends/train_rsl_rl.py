@@ -22,7 +22,7 @@ from isaaclab.envs import DirectMARLEnvCfg
 from isaaclab.utils import to_dict
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.seed import configure_seed
-from isaaclab.utils.string import list_intersection
+from isaaclab.utils.string import list_intersection, string_to_callable
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, resolve_task_config, setup_preset_cli
@@ -167,7 +167,8 @@ def _run(args_cli: argparse.Namespace) -> None:
             screen.stage("Preparing agent")
             start_time = time.time()
             report_activity("Wrapping environment")
-            env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+            wrapper = string_to_callable(agent_cfg.env_wrapper) if agent_cfg.env_wrapper else RslRlVecEnvWrapper
+            env = wrapper(env, clip_actions=agent_cfg.clip_actions)
             report_activity(None)
             report_activity("Building policy")
             if agent_cfg.class_name == "OnPolicyRunner":

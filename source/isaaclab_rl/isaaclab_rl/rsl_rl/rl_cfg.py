@@ -217,11 +217,11 @@ class RslRlBaseRunnerCfg:
     num_steps_per_env: int = MISSING
     """The number of steps per environment per update."""
 
-    init_at_random_ep_len: bool = True
+    init_at_random_ep_len: bool = False
     """Whether to randomize each environment's episode length before learning.
 
-    Defaults to True. Disable this for curricula whose first recorded outcomes must come from
-    complete episodes.
+    Defaults to False so initial outcomes come from complete episodes. Set True to
+    randomize the initial episode counters.
     """
 
     max_iterations: int = MISSING
@@ -255,6 +255,9 @@ class RslRlBaseRunnerCfg:
     .. note::
         This clipping is performed inside the :class:`RslRlVecEnvWrapper` wrapper.
     """
+
+    env_wrapper: str | None = None
+    """Optional module:class adapter for the unified trainer; None uses :class:`RslRlVecEnvWrapper`."""
 
     check_for_nan: bool = True
     """Whether to check for NaN values coming from the environment."""
