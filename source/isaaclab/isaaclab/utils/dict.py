@@ -57,7 +57,7 @@ def class_to_dict(obj: object) -> dict[str, Any]:
     data = {}
     for key, value in obj_dict.items():
         # disregard builtin attributes
-        if key.startswith("__"):
+        if isinstance(key, str) and key.startswith("__"):
             continue
         # Keep lazy callable references as strings; don't force callable introspection.
         if isinstance(value, ResolvableString):

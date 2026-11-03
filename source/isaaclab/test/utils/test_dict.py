@@ -5,6 +5,7 @@
 
 import enum
 from collections import namedtuple
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ import torch
 
 import isaaclab.utils.dict as dict_utils
 import isaaclab.utils.string as string_utils
+from isaaclab.utils.io import dump_yaml, load_yaml
 
 pytestmark = [pytest.mark.unit, pytest.mark.windows_ci]
 
@@ -220,3 +222,17 @@ def test_slice_conversion_leaves_tuple_subclasses_unchanged():
 
     assert serialized["pair"] is data["pair"]
     assert restored["pair"] is data["pair"]
+
+
+@pytest.mark.parametrize("key", [7, (1, 2), SimpleNamespace])
+def test_class_to_dict_preserves_non_string_mapping_keys(key):
+    """Nested mappings retain integer, tuple, or class keys and their values."""
+    cfg = SimpleNamespace(mapping={key: SimpleNamespace(weight=0.5), "__hidden": "omitted"})
+    assert dict_utils.class_to_dict(cfg) == {"mapping": {key: {"weight": 0.5}}}
+
+
+def test_dump_yaml_preserves_class_keyed_configuration(tmp_path):
+    """Configuration logging retains class-keyed settings."""
+    path = str(tmp_path / "class_keys.yaml")
+    dump_yaml(path, SimpleNamespace(strategies={SimpleNamespace: SimpleNamespace(weight=0.5)}))
+    assert load_yaml(path) == {"strategies": {SimpleNamespace: {"weight": 0.5}}}

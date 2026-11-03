@@ -252,9 +252,9 @@ class TeleopSessionLifecycle:
     outputs are chained (matches ``HandsSource.RIGHT``)."""
 
     _STEP_FAILURE_RESTART_COOLDOWN_S = 1.0
-    """Minimum delay [s] before recreating the session after a step failure
-    while the XR session is still active (i.e. a retargeting pipeline error,
-    not an external XR teardown).  The async retarget worker dies permanently
+    """Minimum delay [s] before recreating the session after any step failure.
+
+    The async retarget worker dies permanently
     on any pipeline exception, so session re-entry is the only recovery; the
     cooldown prevents a persistent data error (e.g. degenerate tracking
     input) from churning teardown/restart cycles every frame."""
@@ -1336,15 +1336,16 @@ class TeleopSessionLifecycle:
         except Exception as e:
             # The async retarget worker dies permanently on any pipeline
             # exception, so session re-entry is the only recovery either way;
-            # what differs is the cause and the restart pacing.
+            # report whether the XR session is still active.
             if not self._is_replay and self._kit_xr_session_is_active():
                 logger.warning(
                     "Isaac Capture retargeting step failed (pipeline error, XR session still active); "
-                    f"restarting the teleop session in {self._STEP_FAILURE_RESTART_COOLDOWN_S:.0f}s: {e}"
+                    f"restarting the teleop session in {self._STEP_FAILURE_RESTART_COOLDOWN_S:.0f}s: {e}",
+                    exc_info=True,
                 )
-                self._restart_holdoff_until = time.monotonic() + self._STEP_FAILURE_RESTART_COOLDOWN_S
             else:
-                logger.warning(f"Isaac Capture session step failed (XR session likely torn down): {e}")
+                logger.warning(f"Isaac Capture session step failed (XR session likely torn down): {e}", exc_info=True)
+            self._restart_holdoff_until = time.monotonic() + self._STEP_FAILURE_RESTART_COOLDOWN_S
             self._teardown_dead_session()
             return None
 
@@ -1385,7 +1386,9 @@ class TeleopSessionLifecycle:
             self._session = None
         self._session_start_deferred_logged = False
         self._last_step_result = None
-        logger.info("Isaac Capture session torn down after external XR shutdown")
+        self._last_right_controller = None
+        self._last_left_controller = None
+        logger.info("Isaac Capture session torn down")
 
     # ------------------------------------------------------------------
     # External input building

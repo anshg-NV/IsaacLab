@@ -25,6 +25,7 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -212,6 +213,46 @@ class TestRetargetingExecutionConfig:
 # ============================================================================
 # _ensure_cloudxr_runtime
 # ============================================================================
+
+
+@pytest.mark.parametrize("xr_active", [True, False])
+def test_failed_session_backs_off_then_recovers(caplog, xr_active):
+    """A worker failure must not recreate a session every render frame."""
+    cfg = _make_cfg()
+    cfg.sim_device = "cpu"
+    lifecycle = TeleopSessionLifecycle(cfg)
+    lifecycle._pipeline = MagicMock()
+    failed = MagicMock()
+    failed.step.side_effect = ValueError("Found zero norm quaternions in `quat`.")
+    lifecycle._session = failed
+    lifecycle._last_right_controller = object()
+    recovered = MagicMock()
+    recovered.step.return_value = {"action": [np.zeros(23, dtype=np.float32)]}
+    session_cls = MagicMock(return_value=recovered)
+    fake_tsm_module = sys.modules["isaacteleop.teleop_session_manager"]
+
+    with (
+        patch("isaaclab_teleop.session_lifecycle.time.monotonic", return_value=10.0) as clock,
+        patch.object(lifecycle, "_build_external_inputs", return_value=None),
+        patch.object(lifecycle, "_kit_xr_session_is_active", return_value=xr_active),
+        patch.object(lifecycle, "_ensure_xr_ar_profile_enabled"),
+        patch.object(lifecycle, "_acquire_kit_oxr_handles", return_value=object()),
+        patch.object(fake_tsm_module, "TeleopSession", session_cls),
+    ):
+        assert lifecycle.step() is None
+        failed.__exit__.assert_called_once()
+        assert lifecycle._last_right_controller is None
+        for _ in range(90):
+            assert lifecycle.step() is None
+        session_cls.assert_not_called()
+        assert len([r for r in caplog.records if "step failed" in r.message]) == 1
+        assert any(r.exc_info is not None for r in caplog.records)
+        clock.return_value = 11.01
+        assert lifecycle.step().shape == (23,)
+        assert lifecycle.step().shape == (23,)
+        session_cls.assert_called_once()
+        recovered.__enter__.assert_called_once()
+        assert lifecycle._session is recovered
 
 
 class TestEnsureCloudXRRuntime:
