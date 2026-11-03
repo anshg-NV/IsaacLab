@@ -41,36 +41,53 @@ class VideoRecorder:
         from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
         self._clip_class = ImageSequenceClip
-        source = cfg.source
-        if isinstance(source, str):
-            kind, name, channel = parse_video_source(source)
-            if kind == "sensor":
-                source = ImageViewCfg(
-                    source=name, channels=(channel or "rgb",),
-                    depth_range=(cfg.depth_colormap_min, cfg.depth_colormap_max),
-                )  # fmt: skip
-        if isinstance(source, ImageViewCfg):
-            camera = env.scene.sensors.get(source.source) if isinstance(source.source, str) else None
-            view = env.sim.get_or_create_backend(source, camera=camera)
-            self._capture = lambda: view.read_rgb(env.sim.get_physics_step_count())
+        self._authored_capture = None
+        if cfg.camera_prim_path is not None:
+            from isaaclab_physx.video_recording.isaacsim_kit_perspective_video import (
+                create_isaacsim_kit_perspective_video,
+            )
+            from isaaclab_physx.video_recording.isaacsim_kit_perspective_video_cfg import IsaacsimKitPerspectiveVideoCfg
+
+            self._authored_capture = create_isaacsim_kit_perspective_video(
+                IsaacsimKitPerspectiveVideoCfg(
+                    camera_prim_path=cfg.camera_prim_path,
+                    use_authored_camera_pose=True,
+                    window_width=cfg.window_width,
+                    window_height=cfg.window_height,
+                )
+            )
+            self._capture = self._authored_capture.render_rgb_array
         else:
-            for viz in env.sim.visualizers:
-                if viz.cfg.backend.visualizer_type in CAPTURE_VISUALIZER_TYPES and (
-                    not name or viz.cfg.backend.visualizer_type == name
-                ):
-                    break
+            source = cfg.source
+            if isinstance(source, str):
+                kind, name, channel = parse_video_source(source)
+                if kind == "sensor":
+                    source = ImageViewCfg(
+                        source=name, channels=(channel or "rgb",),
+                        depth_range=(cfg.depth_colormap_min, cfg.depth_colormap_max),
+                    )  # fmt: skip
+            if isinstance(source, ImageViewCfg):
+                camera = env.scene.sensors.get(source.source) if isinstance(source.source, str) else None
+                view = env.sim.get_or_create_backend(source, camera=camera)
+                self._capture = lambda: view.read_rgb(env.sim.get_physics_step_count())
             else:
-                active = [viz.cfg.backend.visualizer_type for viz in env.sim.visualizers]
-                raise RuntimeError(
-                    f"Source {cfg.source!r} has no recording-capable visualizer (active: {active}). "
-                    "Use --viz kit, --viz newton_gl, --viz newton_rtx, or source='sensor:<name>'."
-                )
-            if channel == "streaming_view" and not viz.cfg.streaming_view:
-                raise RuntimeError(
-                    f"Enable streaming_view on {viz.cfg.backend.visualizer_type!r} to record its sensor view."
-                )
-            # Legacy recording follows camera selection in the window.
-            self._capture = viz.render_tiled_rgb_array if channel == "streaming_view" else viz.render_rgb_array
+                for viz in env.sim.visualizers:
+                    if viz.cfg.backend.visualizer_type in CAPTURE_VISUALIZER_TYPES and (
+                        not name or viz.cfg.backend.visualizer_type == name
+                    ):
+                        break
+                else:
+                    active = [viz.cfg.backend.visualizer_type for viz in env.sim.visualizers]
+                    raise RuntimeError(
+                        f"Source {cfg.source!r} has no recording-capable visualizer (active: {active}). "
+                        "Use --viz kit, --viz newton_gl, --viz newton_rtx, or source='sensor:<name>'."
+                    )
+                if channel == "streaming_view" and not viz.cfg.streaming_view:
+                    raise RuntimeError(
+                        f"Enable streaming_view on {viz.cfg.backend.visualizer_type!r} to record its sensor view."
+                    )
+                # Legacy recording follows camera selection in the window.
+                self._capture = viz.render_tiled_rgb_array if channel == "streaming_view" else viz.render_rgb_array
 
         self.cfg = cfg
         self._env = env
@@ -108,6 +125,9 @@ class VideoRecorder:
         """Flush any buffered frames and close the current clip."""
         self._close_clip()
         self._capture = None
+        if self._authored_capture is not None:
+            self._authored_capture.close()
+            self._authored_capture = None
 
     # ------------------------------------------------------------------
     # Private helpers

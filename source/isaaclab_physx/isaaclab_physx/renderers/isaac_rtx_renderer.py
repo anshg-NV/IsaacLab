@@ -12,7 +12,7 @@ import logging
 import math
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -114,10 +114,11 @@ class IsaacRtxRenderData:
     """Render data for Isaac RTX renderer."""
 
     annotators: dict[str, Any]
-    render_product: HydraTexture
+    render_product: HydraTexture | None
     output_data: dict[str, ProxyArray] | None = None
     spec: CameraRenderSpec | None = None
     renderer_info: dict[str, Any] = field(default_factory=dict)
+    independent_views: list[IsaacRtxRenderData] = field(default_factory=list)
     intrinsic_selection: Any = None
     intrinsic_row_attribute: str = ""
     intrinsic_stage: Any = None
@@ -263,6 +264,13 @@ class IsaacRtxRenderer(BaseRenderer):
     def create_render_data(self, spec: CameraRenderSpec) -> IsaacRtxRenderData:
         """Create render product and annotators for the tiled camera.
         See :meth:`~isaaclab.renderers.base_renderer.BaseRenderer.create_render_data`."""
+        if not self.cfg.tiled_rendering and spec.view_count > 1:
+            views = [
+                self.create_render_data(replace(spec, num_instances=1, view_count=1, camera_prim_paths=(path,)))
+                for path in spec.camera_prim_paths
+            ]
+            return IsaacRtxRenderData(annotators={}, render_product=None, spec=spec, independent_views=views)
+
         import omni.replicator.core as rep
         from omni.syntheticdata import SyntheticData
         from pxr import UsdGeom
@@ -322,11 +330,16 @@ class IsaacRtxRenderer(BaseRenderer):
         # ``uuid4().hex`` (no hyphens) prefixed with ``rp_`` is a valid USD identifier.
         # Collision risk is negligible: uuid4 provides 122 random bits, so the birthday-paradox
         # chance among n names is ~n^2 / 2^123 (e.g. ~10^-25 for a million names).
-        rp = rep.create.render_product_tiled(
-            cameras=cam_prim_paths,
-            tile_resolution=(spec.cfg.width, spec.cfg.height),
-            name=f"rp_{uuid.uuid4().hex}",
-        )
+        if self.cfg.tiled_rendering:
+            rp = rep.create.render_product_tiled(
+                cameras=cam_prim_paths,
+                tile_resolution=(spec.cfg.width, spec.cfg.height),
+                name=f"rp_{uuid.uuid4().hex}",
+            )
+        else:
+            rp = rep.create.render_product(
+                cam_prim_paths[0], resolution=(spec.cfg.width, spec.cfg.height), name=f"rp_{uuid.uuid4().hex}"
+            )
 
         # Apply background color as per-render-product USD attributes so each render product gets its own
         # background without touching the process-wide /rtx/background carb settings.
@@ -512,6 +525,15 @@ class IsaacRtxRenderer(BaseRenderer):
     def set_outputs(self, render_data: IsaacRtxRenderData, output_data: dict[str, ProxyArray]):
         """Store reference to output buffers for writing during render.
         See :meth:`~isaaclab.renderers.base_renderer.BaseRenderer.set_outputs`."""
+        if render_data.independent_views:
+            from isaaclab.utils.warp import ProxyArray
+
+            render_data.output_data = output_data
+            for index, view in enumerate(render_data.independent_views):
+                self.set_outputs(
+                    view, {key: ProxyArray(value.warp[index : index + 1]) for key, value in output_data.items()}
+                )
+            return
         if render_data.ppisp_pipeline is not None and str(RenderBufferKind.RGBA) not in output_data:
             raise ValueError(
                 "Isaac RTX renderer ISP requires 'rgba' (or 'rgb', which aliases into rgba) as the"
@@ -589,7 +611,14 @@ class IsaacRtxRenderer(BaseRenderer):
         ensure_isaac_rtx_render_update()
 
         for data in cameras:
-            self._read_annotator_output(data)
+            if data.independent_views:
+                data.renderer_info.clear()
+                for index, view in enumerate(data.independent_views):
+                    self._read_annotator_output(view)
+                    for key, info in view.renderer_info.items():
+                        data.renderer_info.setdefault(key, {})[index] = info
+            else:
+                self._read_annotator_output(data)
 
     def _read_annotator_output(self, render_data: IsaacRtxRenderData) -> None:
         """Extract one camera's annotator data into its bound output buffers."""
@@ -734,11 +763,15 @@ class IsaacRtxRenderer(BaseRenderer):
         if render_data is None:
             return
 
-        for annotator in render_data.annotators.values():
-            annotator.detach([render_data.render_product.path])
+        for view in render_data.independent_views:
+            self.cleanup(view)
+        render_data.independent_views.clear()
 
-        render_data.render_product.destroy()
-        render_data.render_product = None
+        if render_data.render_product is not None:
+            for annotator in render_data.annotators.values():
+                annotator.detach([render_data.render_product.path])
+            render_data.render_product.destroy()
+            render_data.render_product = None
 
         render_data.intrinsic_selection = None
         if render_data.intrinsic_stage is not None and render_data.spec is not None:

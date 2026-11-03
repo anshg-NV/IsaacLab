@@ -265,6 +265,8 @@ def validate_launch(  # noqa: C901
 
     viewers = [viewer for sim in simulations for viewer in sim.visualizer_cfgs]
     for recorder in (node for node in configs if isinstance(node, VideoRecorderCfg)):
+        if recorder.camera_prim_path is not None:
+            recorder.source = "viz:kit"
         if isinstance(recorder.source, ImageViewCfg):
             if isinstance(recorder.source.source, str):
                 continue

@@ -143,6 +143,14 @@ class IsaacRtxRendererCfg(RendererCfg):
     environment variable still supplies that default when set.
     """
 
+    tiled_rendering: bool = True
+    """Combine camera views in one tiled render product. Defaults to True.
+
+    Set False for independent per-environment intrinsics: the tiled RTX path can
+    reuse the first camera's projection for other tiles. Separate render products
+    preserve each camera's lens at the cost of additional rendering overhead.
+    """
+
     semantic_filter: str | list[str] = "*:*"
     """A string or a list specifying a semantic filter predicate. Defaults to ``"*:*"``.
 

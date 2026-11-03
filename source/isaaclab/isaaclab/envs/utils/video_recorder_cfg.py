@@ -96,6 +96,19 @@ class VideoRecorderCfg:
     visualizer when none is selected. An ``ImageViewCfg`` records its selection independently of a window.
     """
 
+    camera_prim_path: str | None = None
+    """Capture an existing USD camera without changing its authored pose or lens.
+
+    When set, overrides :attr:`source` and requires Kit. Simulation launch selects
+    the Kit runtime automatically. ``None`` uses the configured source.
+    """
+
+    window_width: int = 1280
+    """Authored-camera capture width [px]; used only when :attr:`camera_prim_path` is set."""
+
+    window_height: int = 720
+    """Authored-camera capture height [px]; used only when :attr:`camera_prim_path` is set."""
+
     output_dir: str | None = None
     """Directory for output mp4 files (created on demand).
 

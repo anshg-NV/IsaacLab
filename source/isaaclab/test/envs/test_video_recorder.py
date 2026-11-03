@@ -307,3 +307,24 @@ def test_clip_files_resume_and_prune_only_matching_indices(tmp_path, existing, e
         recorder.step()
 
     assert sorted(path.name for path in tmp_path.iterdir()) == expected
+
+
+def test_authored_camera_recording_preserves_camera_selection_and_releases_capture(tmp_path):
+    """Recording uses the scene camera and releases its render product on close."""
+    camera_path = "/World/envs/env_0/SceneCamera"
+    cfg = _cfg(camera_prim_path=camera_path, window_width=12, window_height=8, output_dir=str(tmp_path))
+    with patch(
+        "isaaclab_physx.video_recording.isaacsim_kit_perspective_video.create_isaacsim_kit_perspective_video"
+    ) as factory:
+        capture = factory.return_value
+        capture.render_rgb_array.return_value = _FRAME
+        recorder = VideoRecorder(cfg, SimpleNamespace(step_dt=0.02))
+        recorder.step()
+        recorder.close()
+
+    forwarded = factory.call_args.args[0]
+    assert forwarded.camera_prim_path == camera_path
+    assert forwarded.use_authored_camera_pose
+    assert (forwarded.window_width, forwarded.window_height) == (12, 8)
+    capture.render_rgb_array.assert_called_once()
+    capture.close.assert_called_once()
